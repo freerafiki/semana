@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
 from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import LeaveOneOut, cross_val_predict
@@ -11,7 +12,7 @@ import matplotlib.pyplot as plt
 from anchor_sentences import REGULATED_MARKET_ANCHORS_SENTENCES as ANCHORS
 from test_sentences import REGULATED_MARKET_TEST_SENTENCES as TEST_SET
 from parameters import EMBEDDING_MODEL, EMBEDDING_SIZE, PCA_COMPONENTS, EVALUATE_PROBE
-from eval_utils import embed_list, evaluate_test 
+from eval_utils import embed_list, evaluate, evaluate_probe
 
 ##############################
 # INPUT
@@ -60,14 +61,14 @@ print("1. Fitting via RIDGE REGRESSION..")
 #    RidgeCV searches over alpha (regularization strength) using internal CV,
 #    which matters a lot here since N << 768 (see the underdetermined-system point).
 alphas = np.logspace(-5, 0, 30)
-model = RidgeCV(alphas=alphas, store_cv_results=True)
+ridge_model = RidgeCV(alphas=alphas, store_cv_results=True)
 
 # alphas=(0.1, 1.0, 10.0), *, fit_intercept=True, scoring=None, cv=None, gcv_mode=None, store_cv_results=False, alpha_per_target=False
-model.fit(anchor_embeddings, anchor_labels)
+ridge_model.fit(anchor_embeddings, anchor_labels)
 
-axis = model.coef_        # shape (768,) - this is your "axis" vector w
-intercept = model.intercept_
-print("Chosen alpha:", model.alpha_)
+axis = ridge_model.coef_        # shape (768,) - this is your "axis" vector w
+intercept = ridge_model.intercept_
+print("Chosen alpha:", ridge_model.alpha_)
 
 # 2. Sanity-check: does the fit actually track the labels, or is it just
 #    memorizing (which is trivially possible when N << 768)?
@@ -82,7 +83,7 @@ print(f"Leave-one-out Spearman correlation: {rho:.3f} (p={p:.4f})")
 print("-" * 50)
 print("EVALUATION ON TEST SET")
 print("Ridge Regression")
-scores, errors, min_val, max_val = evaluate_test(test_embeddings, model, print_results=True)
+RR_test_scores, RR_test_errors, RR_test_min, RR_test_max = evaluate(test_embeddings, test_labels, ridge_model, print_results=True)
 
 # print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
 
@@ -95,7 +96,7 @@ model_reduced = RidgeCV(alphas=alphas).fit(X_reduced, anchor_labels)
 
 print("-" * 50)
 print(f"PCA + Ridge Regression (PCA with {PCA_COMPONENTS} components)")
-scores, errors, min_val, max_val = evaluate_test(test_embeddings, model_reduced, print_results=True)
+PCA_RR_test_scores, PCA_RR_test_errors, PCA_RR_test_min, PCA_RR_test_max = evaluate(test_embeddings, test_labels, model_reduced, print_results=True)
 
 # errors = np.zeros((len(TEST_SET), 1))
 # min_val = 1
@@ -119,23 +120,24 @@ scores, errors, min_val, max_val = evaluate_test(test_embeddings, model_reduced,
 
 
 
-print("=" * 50)
-print("EVALUATION RIDGE REGRESSION\nON ANCHOR + SET (TRAIN vs TEST set differences)")
 print("-" * 50)
-RR_anchors_scores = np.zeros((len(TEST_SET), 1))
-for i, anchor_emb in enumerate(X):
-    RR_anchors_scores[i] = project(anchor_emb, model)
-RR_test_scores = np.zeros((len(TEST_SET), 1))
-for i, test_embd in enumerate(test_embeddings):
-    RR_test_scores[i] = project(test_embd, model)
+print("TRAIN vs TEST set metrics")
+print("-" * 50)
+RR_anchors_scores, RR_anchor_errors, RR_anchor_min, RR_anchor_max = evaluate(anchor_embeddings, anchor_labels, ridge_model)
+# RR_anchors_scores = np.zeros((len(TEST_SET), 1))
+# for i, anchor_emb in enumerate(X):
+#     RR_anchors_scores[i] = project(anchor_emb, ridge_model)
+# RR_test_scores = np.zeros((len(TEST_SET), 1))
+# for i, test_embd in enumerate(test_embeddings):
+#     RR_test_scores[i] = project(test_embd, ridge_model)
 
-RR_train_metrics = evaluate_probe(y, RR_anchors_scores, "Anchor (Train)")
+RR_train_metrics = evaluate_probe(anchor_labels, RR_anchors_scores, "Anchor (Train)")
 RR_test_metrics  = evaluate_probe(test_labels,  RR_test_scores,  "Test")
 
 #
 # EVALUATE PROBE
 
-
+print("=" * 50)
 
 # ── Assume you already have these from your probe ──
 # y_true_test:  list/array of true labels for test sentences
@@ -167,14 +169,14 @@ RR_test_metrics  = evaluate_probe(test_labels,  RR_test_scores,  "Test")
 # combinatorially enormous (768 choose 2 ≈ 295k new features from 15 points).
 # n_components = min(15, len(X) - 1)   # keep well below N to avoid a new singular system
 pca = PCA(n_components=PCA_COMPONENTS)
-X_reduced = pca.fit_transform(X)
+X_reduced = pca.fit_transform(test_embeddings)
 
 poly = PolynomialFeatures(degree=2, include_bias=False)
 X_poly = poly.fit_transform(X_reduced)   # now includes pairwise interaction terms
 
 alphas = np.logspace(-2, 4, 30)
 poly_model = RidgeCV(alphas=alphas)
-poly_model.fit(X_poly, y)
+poly_model.fit(X_poly, test_labels)
 
 # Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
 def loo_poly_eval(X, y, n_components):
@@ -189,32 +191,37 @@ def loo_poly_eval(X, y, n_components):
         preds[test_idx] = m.predict(Xte_p)
     return preds
 
-poly_preds = loo_poly_eval(X, y, PCA_COMPONENTS)
-rho_poly, _ = spearmanr(y, poly_preds)
+poly_preds = loo_poly_eval(X, test_labels, PCA_COMPONENTS)
+rho_poly, _ = spearmanr(test_labels, poly_preds)
 print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
-print("=" * 50)
-print("EVALUATION ON TEST SET\nRidge Regression projection on TEST SET")
-errors = np.zeros((len(TEST_SET), 1))
-min_val = 1
-max_val = 0
-test_scores = np.zeros((len(TEST_SET), ))
-for i, test_sentence in enumerate(TEST_SET):
-    score = project(test_embeddings[i, :], model)
-    test_scores[i] = score
-    if score < min_val:
-        min_val = score 
-    if score > max_val:
-        max_val = score
-    errors[i] = np.abs(score - test_sentence['label'])
+print("-" * 50)
+print("EVALUATION ON TEST SET")
+print("PCA + Polynomial + Ridge")
+PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_embeddings, test_labels, poly_model, print_results=True)
+
+# print("=" * 50)
+# print("EVALUATION ON TEST SET\nRidge Regression projection on TEST SET")
+# errors = np.zeros((len(TEST_SET), 1))
+# min_val = 1
+# max_val = 0
+# test_scores = np.zeros((len(TEST_SET), ))
+# for i, test_sentence in enumerate(TEST_SET):
+#     score = project(test_embeddings[i, :], ridge_model)
+#     test_scores[i] = score
+#     if score < min_val:
+#         min_val = score 
+#     if score > max_val:
+#         max_val = score
+#     errors[i] = np.abs(score - test_sentence['label'])
 
 # print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
 
-print(f"with fitted line on the embeddings from {EMBEDDING_MODEL}:")
-print(f"    MAE: {(np.mean(errors)):.03f}")
-print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
-print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
-print(f"    min_val: {min_val:.03f}")
-print(f"    max_val: {max_val:.03f}")
+# print(f"with fitted line on the embeddings from {EMBEDDING_MODEL}:")
+# print(f"    MAE: {(np.mean(errors)):.03f}")
+# print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
+# print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
+# print(f"    min_val: {min_val:.03f}")
+# print(f"    max_val: {max_val:.03f}")
 
 # order = np.argsort(X_poly)
 # plt.figure()
@@ -223,6 +230,8 @@ print(f"    max_val: {max_val:.03f}")
 # plt.plot(X_poly[order], poly_model.predict(X_poly[order]), '-', label='isotonic fit')
 # plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
 # plt.show()
+
+breakpoint()
 
 # ---------- 2. Isotonic recalibration on your existing linear axis ----------
 # Step A: fit your original linear axis (as before)

@@ -21,26 +21,26 @@ def project_reduced(x_doc, pca, model):
     return np.dot(pca.transform(x_doc.reshape(1, -1)), model.coef_)[0] + model.intercept_
 
 
-def evaluate_test(embeddings_list, model, reduced=False, pca=None, print_results=True):
+def evaluate(embeddings, labels, model, reduced=False, pca=None, print_results=True):
     """
     projection_func is callable (the projection function)
     """
-    scores = np.zeros((len(embeddings_list), 1))
-    errors = np.zeros((len(embeddings_list), 1))
+    scores = np.zeros((len(embeddings), 1))
+    errors = np.zeros((len(embeddings), 1))
     min_val = 1
     max_val = 0
     
-    for i, test_sentence in enumerate(embeddings_list):
+    for i, test_sentence in enumerate(embeddings):
         if reduced:
-            score = project_reduced(embeddings_list[i, :], pca, model)
+            score = project_reduced(embeddings[i, :], pca, model)
         else:
-            score = project(embeddings_list[i, :], model)
+            score = project(embeddings[i, :], model)
         scores[i] = score
         if score < min_val:
             min_val = score 
         if score > max_val:
             max_val = score
-        errors[i] = np.abs(score - test_sentence['label'])
+        errors[i] = np.abs(score - labels)
 
     if print_results:
         print(f"    MAE: {(np.mean(errors)):.03f}")
