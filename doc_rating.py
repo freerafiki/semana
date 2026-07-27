@@ -203,7 +203,7 @@ if EVALUATE_PROBE:
 # ---------- 1. Polynomial features + Ridge ----------
 # Must reduce dimensionality first - degree-2 features on 768 raw dims is
 # combinatorially enormous (768 choose 2 ≈ 295k new features from 15 points).
-n_components = min(5, len(X) - 1)   # keep well below N to avoid a new singular system
+n_components = min(15, len(X) - 1)   # keep well below N to avoid a new singular system
 pca = PCA(n_components=n_components)
 X_reduced = pca.fit_transform(X)
 
