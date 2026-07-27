@@ -19,7 +19,6 @@ from eval_utils import embed_list, evaluate, evaluate_probe
 ##############################
 # X: shape (N, 768) - embeddings of your N graded sentences
 anchors = ANCHORS['data']
-X = np.zeros((len(anchors), EMBEDDING_SIZE))
 
 ##############################
 # EMBEDDINGS
@@ -41,12 +40,14 @@ anchor_labels /= np.max(anchor_labels) # normalization
 #         anchor_embeddings[i, :] = resp['embedding']
         # anchor_scores[i] = project(test_embeddings[i, :], model)
 
-print("=" * 50)
-print("Embedding TEST sentences")
-test_embeddings = embed_list(TEST_SET, EMBEDDING_MODEL, EMBEDDING_SIZE)
+print("-" * 50)
+print(f"Embedding the TEST sentences with {EMBEDDING_MODEL},.")
+test_sentences = TEST_SET['data']
+test_embeddings = embed_list(test_sentences, EMBEDDING_MODEL, EMBEDDING_SIZE)
 test_labels = TEST_SET['labels']
 test_labels /= np.max(test_labels) # normalization
-
+print("=" * 50)
+print()
 # for i, test_sentence in enumerate(TEST_SET):
 #     resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=test_sentence['text'])
 #     test_embeddings[i, :] = resp['embedding']
@@ -73,8 +74,8 @@ print("Chosen alpha:", ridge_model.alpha_)
 # 2. Sanity-check: does the fit actually track the labels, or is it just
 #    memorizing (which is trivially possible when N << 768)?
 #    Leave-one-out cross-validated predictions are the honest check.
-loo_preds = cross_val_predict(RidgeCV(alphas=alphas), X, y, cv=LeaveOneOut())
-rho, p = spearmanr(y, loo_preds)
+loo_preds = cross_val_predict(RidgeCV(alphas=alphas), anchor_embeddings, anchor_labels, cv=LeaveOneOut())
+rho, p = spearmanr(anchor_labels, loo_preds)
 print(f"Leave-one-out Spearman correlation: {rho:.3f} (p={p:.4f})")
 # If this is weak/non-significant, the in-sample fit is likely just
 # overfitting noise in 768 dims - don't trust the axis yet; get more N
@@ -90,13 +91,13 @@ RR_test_scores, RR_test_errors, RR_test_min, RR_test_max = evaluate(test_embeddi
 
 # 4. Optional but recommended given N << 768: reduce dimensionality first,
 #    then fit ridge in the reduced space (fixes the underdetermined-system issue).
-pca = PCA(n_components=min(PCA_COMPONENTS, len(X) - 1))
+pca = PCA(n_components=min(PCA_COMPONENTS, len(anchor_embeddings) - 1))
 X_reduced = pca.fit_transform(anchor_embeddings)   # fit PCA on your anchors (or a larger reference corpus)
 model_reduced = RidgeCV(alphas=alphas).fit(X_reduced, anchor_labels)
 
 print("-" * 50)
 print(f"PCA + Ridge Regression (PCA with {PCA_COMPONENTS} components)")
-PCA_RR_test_scores, PCA_RR_test_errors, PCA_RR_test_min, PCA_RR_test_max = evaluate(test_embeddings, test_labels, model_reduced, print_results=True)
+PCA_RR_test_scores, PCA_RR_test_errors, PCA_RR_test_min, PCA_RR_test_max = evaluate(test_embeddings, test_labels, model_reduced, reduced=True, pca=pca, print_results=True)
 
 # errors = np.zeros((len(TEST_SET), 1))
 # min_val = 1
@@ -169,14 +170,14 @@ print("=" * 50)
 # combinatorially enormous (768 choose 2 ≈ 295k new features from 15 points).
 # n_components = min(15, len(X) - 1)   # keep well below N to avoid a new singular system
 pca = PCA(n_components=PCA_COMPONENTS)
-X_reduced = pca.fit_transform(test_embeddings)
+X_reduced = pca.fit_transform(anchor_embeddings)
 
 poly = PolynomialFeatures(degree=2, include_bias=False)
 X_poly = poly.fit_transform(X_reduced)   # now includes pairwise interaction terms
 
 alphas = np.logspace(-2, 4, 30)
 poly_model = RidgeCV(alphas=alphas)
-poly_model.fit(X_poly, test_labels)
+poly_model.fit(X_poly, anchor_labels)
 
 # Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
 def loo_poly_eval(X, y, n_components):
@@ -191,8 +192,8 @@ def loo_poly_eval(X, y, n_components):
         preds[test_idx] = m.predict(Xte_p)
     return preds
 
-poly_preds = loo_poly_eval(X, test_labels, PCA_COMPONENTS)
-rho_poly, _ = spearmanr(test_labels, poly_preds)
+poly_preds = loo_poly_eval(anchor_embeddings, anchor_labels, PCA_COMPONENTS)
+rho_poly, _ = spearmanr(anchor_labels, poly_preds)
 print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
 print("-" * 50)
 print("EVALUATION ON TEST SET")

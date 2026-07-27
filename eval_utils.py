@@ -21,7 +21,20 @@ def project_reduced(x_doc, pca, model):
     return np.dot(pca.transform(x_doc.reshape(1, -1)), model.coef_)[0] + model.intercept_
 
 
-def evaluate(embeddings, labels, model, reduced=False, pca=None, print_results=True):
+# Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
+def loo_poly_eval(X, y, n_components):
+    preds = np.zeros(len(y))
+    loo = LeaveOneOut()
+    for train_idx, test_idx in loo.split(X):
+        pca_f = PCA(n_components=PCA_COMPONENTS).fit(X[train_idx])
+        Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
+        poly_f = PolynomialFeatures(degree=2, include_bias=False).fit(Xtr)
+        Xtr_p, Xte_p = poly_f.transform(Xtr), poly_f.transform(Xte)
+        m = RidgeCV(alphas=alphas).fit(Xtr_p, y[train_idx])
+        preds[test_idx] = m.predict(Xte_p)
+    return preds
+
+def evaluate(embeddings, labels, model, projection_method, reduced=False, pca=None, print_results=True):
     """
     projection_func is callable (the projection function)
     """
@@ -29,25 +42,27 @@ def evaluate(embeddings, labels, model, reduced=False, pca=None, print_results=T
     errors = np.zeros((len(embeddings), 1))
     min_val = 1
     max_val = 0
+
+    assert len(embeddings) == len(labels), "misaligned embeddings and labels!"
     
     for i, test_sentence in enumerate(embeddings):
         if reduced:
-            score = project_reduced(embeddings[i, :], pca, model)
+            score = project_reduced(test_sentence, pca, model)
         else:
-            score = project(embeddings[i, :], model)
+            score = project(test_sentence, model)
         scores[i] = score
         if score < min_val:
             min_val = score 
         if score > max_val:
             max_val = score
-        errors[i] = np.abs(score - labels)
+        errors[i] = np.abs(score - labels[i])
 
     if print_results:
         print(f"    MAE: {(np.mean(errors)):.03f}")
         print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
         print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
         print(f"    min_val: {min_val:.03f}")
-        print(f"    max_val: {max_val:.03f}")
+        print(f"    ma},_val: {max_val:.03f}")
 
     return scores, errors, min_val, max_val
 
