@@ -161,7 +161,7 @@ errors = np.zeros((len(test_sentences), 1))
 min_val = 1
 max_val = 0
 for i, test_sentence in enumerate(test_sentences):
-    score = test_embeddings[i, :]
+    score = project(test_embeddings[i, :], model)
     if score < min_val:
         min_val = score 
     if score > max_val:
@@ -172,8 +172,8 @@ print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
 
 print(f"with fitted line on the embeddings from {EMBEDDING_MODEL}:")
 print(f"    MAE: {(np.mean(errors)):.03f}")
-print(f"    MSE: {(np.square(errors)):.03f}")
-print(f"    RMSE: {(np.sqrt(np.square(errors))):.03f}")
+print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
+print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
 print(f"    min_val: {min_val:.03f}")
 print(f"    max_val: {max_val:.03f}")
 
@@ -193,7 +193,7 @@ errors = np.zeros((len(test_sentences), 1))
 min_val = 1
 max_val = 0
 for i, test_sentence in enumerate(test_sentences):
-    score = test_embeddings[i, :]    
+    score = project_reduced(test_embeddings[i, :], pca, model_reduced) 
     if score < min_val:
         min_val = score 
     if score > max_val:
@@ -203,8 +203,8 @@ for i, test_sentence in enumerate(test_sentences):
 
 print(f"with fitted line after PCA on the embeddings from {EMBEDDING_MODEL}:")
 print(f"    MAE: {(np.mean(errors)):.03f}")
-print(f"    MSE: {(np.square(errors)):.03f}")
-print(f"    RMSE: {(np.sqrt(np.square(errors))):.03f}")
+print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
+print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
 print(f"    min_val: {min_val:.03f}")
 print(f"    max_val: {max_val:.03f}")
 
