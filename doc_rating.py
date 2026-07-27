@@ -1,10 +1,7 @@
 import numpy as np
-from scipy.stats import spearmanr
-import ollama
 from sklearn.decomposition import PCA
 from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import LeaveOneOut, cross_val_predict
-from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.isotonic import IsotonicRegression
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -13,28 +10,52 @@ import matplotlib.pyplot as plt
 
 from anchor_sentences import REGULATED_MARKET_ANCHORS_SENTENCES as ANCHORS
 from test_sentences import REGULATED_MARKET_TEST_SENTENCES as TEST_SET
+from parameters import EMBEDDING_MODEL, EMBEDDING_SIZE, PCA_COMPONENTS, EVALUATE_PROBE
+from eval_utils import embed_list, evaluate_test 
 
-# EMBEDDING_MODEL = 'embeddinggemma' #nomic-embed-text-v2-moe:latest' #embeddinggemma:latest' #qwen3-embedding:0.6b' #'qwen3-embedding:0.6b' # 'nomic-embed-text-v2-moe:latest'
-EMBEDDING_MODEL = 'qwen3-embedding:0.6b'  #nomic-embed-text-v2-moe:latest' #embeddinggemma:latest' ##'qwen3-embedding:0.6b' # 'nomic-embed-text-v2-moe:latest'
-EMBEDDING_SIZE = 1024 #1024 #1024 #768
-EVALUATE_PROBE = True
-
-
+##############################
+# INPUT
+##############################
 # X: shape (N, 768) - embeddings of your N graded sentences
 anchors = ANCHORS['data']
 X = np.zeros((len(anchors), EMBEDDING_SIZE))
 
+##############################
+# EMBEDDINGS
+##############################
 print("=" * 50)
-print(f"Embedding the sentences with {EMBEDDING_MODEL},.")
-for i, sentence in enumerate(anchors):
-    resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=sentence)
-    X[i, :] = resp["embedding"]
-
+print(f"Embedding the ANCHOR sentences with {EMBEDDING_MODEL},.")
+anchor_embeddings = embed_list(anchors, EMBEDDING_MODEL, EMBEDDING_SIZE)
 # y: shape (N,)      - their Likert labels, e.g. [1, 1, 2, 3, 4, 5, 5, ...]
-y = ANCHORS['labels']
-y /= np.max(y) # normalization
+anchor_labels = ANCHORS['labels']
+anchor_labels /= np.max(anchor_labels) # normalization
 
-print("Fitting via ridge regession..")
+# if EVALUATE_PROBE:
+#     print("=" * 50)
+#     print("embedding anchor sentences")
+#     anchor_embeddings = np.zeros((len(anchors), EMBEDDING_SIZE))
+#     anchor_scores = np.zeros((len(anchors), ))
+#     for i, anchor_sentence in enumerate(anchors):
+#         resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=anchor_sentence)
+#         anchor_embeddings[i, :] = resp['embedding']
+        # anchor_scores[i] = project(test_embeddings[i, :], model)
+
+print("=" * 50)
+print("Embedding TEST sentences")
+test_embeddings = embed_list(TEST_SET, EMBEDDING_MODEL, EMBEDDING_SIZE)
+test_labels = TEST_SET['labels']
+test_labels /= np.max(test_labels) # normalization
+
+# for i, test_sentence in enumerate(TEST_SET):
+#     resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=test_sentence['text'])
+#     test_embeddings[i, :] = resp['embedding']
+#     test_labels[i] = test_sentence['label']
+
+##############################
+# FIT REGRESSION
+##############################
+print("#" * 60)
+print("1. Fitting via RIDGE REGRESSION..")
 # 1. Fit the axis via ridge regression (closed-form, no iterative "training" loop).
 #    RidgeCV searches over alpha (regularization strength) using internal CV,
 #    which matters a lot here since N << 768 (see the underdetermined-system point).
@@ -42,7 +63,7 @@ alphas = np.logspace(-5, 0, 30)
 model = RidgeCV(alphas=alphas, store_cv_results=True)
 
 # alphas=(0.1, 1.0, 10.0), *, fit_intercept=True, scoring=None, cv=None, gcv_mode=None, store_cv_results=False, alpha_per_target=False
-model.fit(X, y)
+model.fit(anchor_embeddings, anchor_labels)
 
 axis = model.coef_        # shape (768,) - this is your "axis" vector w
 intercept = model.intercept_
@@ -58,23 +79,121 @@ print(f"Leave-one-out Spearman correlation: {rho:.3f} (p={p:.4f})")
 # overfitting noise in 768 dims - don't trust the axis yet; get more N
 # or shrink dimensionality first (see step 4).
 
-# 3. Project any new document embedding onto the axis - this is the
-#    whole "scoring" operation, a single dot product:
-def project(x_doc, model):
-    return np.dot(x_doc, model.coef_) + model.intercept_
+print("-" * 50)
+print("EVALUATION ON TEST SET")
+print("Ridge Regression")
+scores, errors, min_val, max_val = evaluate_test(test_embeddings, model, print_results=True)
+
+# print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
+
+
+# 4. Optional but recommended given N << 768: reduce dimensionality first,
+#    then fit ridge in the reduced space (fixes the underdetermined-system issue).
+pca = PCA(n_components=min(PCA_COMPONENTS, len(X) - 1))
+X_reduced = pca.fit_transform(anchor_embeddings)   # fit PCA on your anchors (or a larger reference corpus)
+model_reduced = RidgeCV(alphas=alphas).fit(X_reduced, anchor_labels)
+
+print("-" * 50)
+print(f"PCA + Ridge Regression (PCA with {PCA_COMPONENTS} components)")
+scores, errors, min_val, max_val = evaluate_test(test_embeddings, model_reduced, print_results=True)
+
+# errors = np.zeros((len(TEST_SET), 1))
+# min_val = 1
+# max_val = 0
+# for i, test_sentence in enumerate(TEST_SET):
+#     score = project_reduced(test_embeddings[i, :], pca, model_reduced) 
+#     if score < min_val:
+#         min_val = score 
+#     if score > max_val:
+#         max_val = score
+#     errors[i] = np.abs(score - test_sentence['label'])
+#     # print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
+
+# print(f"with fitted line after PCA on the embeddings from {EMBEDDING_MODEL}:")
+# print(f"    MAE: {(np.mean(errors)):.03f}")
+# print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
+# print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
+# print(f"    min_val: {min_val:.03f}")
+# print(f"    max_val: {max_val:.03f}")
+
+
 
 
 print("=" * 50)
-print("embedding test sentences")
-test_embeddings = np.zeros((len(TEST_SET), EMBEDDING_SIZE))
-test_labels = np.zeros((len(TEST_SET), ))
-for i, test_sentence in enumerate(TEST_SET):
-    resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=test_sentence['text'])
-    test_embeddings[i, :] = resp['embedding']
-    test_labels[i] = test_sentence['label']
+print("EVALUATION RIDGE REGRESSION\nON ANCHOR + SET (TRAIN vs TEST set differences)")
+print("-" * 50)
+RR_anchors_scores = np.zeros((len(TEST_SET), 1))
+for i, anchor_emb in enumerate(X):
+    RR_anchors_scores[i] = project(anchor_emb, model)
+RR_test_scores = np.zeros((len(TEST_SET), 1))
+for i, test_embd in enumerate(test_embeddings):
+    RR_test_scores[i] = project(test_embd, model)
 
+RR_train_metrics = evaluate_probe(y, RR_anchors_scores, "Anchor (Train)")
+RR_test_metrics  = evaluate_probe(test_labels,  RR_test_scores,  "Test")
+
+#
+# EVALUATE PROBE
+
+
+
+# ── Assume you already have these from your probe ──
+# y_true_test:  list/array of true labels for test sentences
+# y_pred_test:  list/array of predicted labels for test sentences
+# y_true_train: list/array of true labels for anchor sentences
+# y_pred_train: list/array of predicted labels for anchor sentences
+
+
+    # breakpoint()
+    # print(y.shape, anchor_embeddings.shape)
+    # print(test_labels, test_embeddings.shape)
+    # Evaluate on both sets
+
+    # # Quick overfitting check
+    # if train_metrics["r2"] - test_metrics["r2"] > 0.2:
+    #     print("\n⚠️  Large gap between train and test R² — possible overfitting.")
+    # elif test_metrics["r2"] < 0.3:
+    #     print("\n⚠️  Low test R² — probe may be underfitting or embeddings don't encode this axis well.")
+    # else:
+    #     print("\n✅  Train/test gap is reasonable — probe appears to generalize.")
+
+
+
+
+# X: (N, 768) anchor embeddings, y: (N,) labels in [0, 1]
+
+# ---------- 1. Polynomial features + Ridge ----------
+# Must reduce dimensionality first - degree-2 features on 768 raw dims is
+# combinatorially enormous (768 choose 2 ≈ 295k new features from 15 points).
+# n_components = min(15, len(X) - 1)   # keep well below N to avoid a new singular system
+pca = PCA(n_components=PCA_COMPONENTS)
+X_reduced = pca.fit_transform(X)
+
+poly = PolynomialFeatures(degree=2, include_bias=False)
+X_poly = poly.fit_transform(X_reduced)   # now includes pairwise interaction terms
+
+alphas = np.logspace(-2, 4, 30)
+poly_model = RidgeCV(alphas=alphas)
+poly_model.fit(X_poly, y)
+
+# Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
+def loo_poly_eval(X, y, n_components):
+    preds = np.zeros(len(y))
+    loo = LeaveOneOut()
+    for train_idx, test_idx in loo.split(X):
+        pca_f = PCA(n_components=PCA_COMPONENTS).fit(X[train_idx])
+        Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
+        poly_f = PolynomialFeatures(degree=2, include_bias=False).fit(Xtr)
+        Xtr_p, Xte_p = poly_f.transform(Xtr), poly_f.transform(Xte)
+        m = RidgeCV(alphas=alphas).fit(Xtr_p, y[train_idx])
+        preds[test_idx] = m.predict(Xte_p)
+    return preds
+
+poly_preds = loo_poly_eval(X, y, PCA_COMPONENTS)
+rho_poly, _ = spearmanr(y, poly_preds)
+print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
 print("=" * 50)
-print("Testing with projection on the fitted line")
+print("EVALUATION ON TEST SET\nRidge Regression projection on TEST SET")
 errors = np.zeros((len(TEST_SET), 1))
 min_val = 1
 max_val = 0
@@ -96,140 +215,6 @@ print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
 print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
 print(f"    min_val: {min_val:.03f}")
 print(f"    max_val: {max_val:.03f}")
-
-
-# 4. Optional but recommended given N << 768: reduce dimensionality first,
-#    then fit ridge in the reduced space (fixes the underdetermined-system issue).
-pca = PCA(n_components=min(15, len(X) - 1))
-X_reduced = pca.fit_transform(X)   # fit PCA on your anchors (or a larger reference corpus)
-model_reduced = RidgeCV(alphas=alphas).fit(X_reduced, y)
-
-def project_reduced(x_doc, pca, model):
-    return np.dot(pca.transform(x_doc.reshape(1, -1)), model.coef_)[0] + model.intercept_
-
-print("=" * 50)
-print("Testing with projection on the fitted line after using PCA")
-errors = np.zeros((len(TEST_SET), 1))
-min_val = 1
-max_val = 0
-for i, test_sentence in enumerate(TEST_SET):
-    score = project_reduced(test_embeddings[i, :], pca, model_reduced) 
-    if score < min_val:
-        min_val = score 
-    if score > max_val:
-        max_val = score
-    errors[i] = np.abs(score - test_sentence['label'])
-    # print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
-
-print(f"with fitted line after PCA on the embeddings from {EMBEDDING_MODEL}:")
-print(f"    MAE: {(np.mean(errors)):.03f}")
-print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
-print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
-print(f"    min_val: {min_val:.03f}")
-print(f"    max_val: {max_val:.03f}")
-
-print("=" * 50)
-
-
-#
-# EVALUATE PROBE
-
-
-
-# ── Assume you already have these from your probe ──
-# y_true_test:  list/array of true labels for test sentences
-# y_pred_test:  list/array of predicted labels for test sentences
-# y_true_train: list/array of true labels for anchor sentences
-# y_pred_train: list/array of predicted labels for anchor sentences
-
-def evaluate_probe(y_true, y_pred, set_name=""):
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    
-    # 1. R² — proportion of variance explained (higher is better, max=1)
-    r2 = r2_score(y_true, y_pred)
-    
-    # 2. Mean Absolute Error — average distance from true label (lower is better)
-    mae = mean_absolute_error(y_true, y_pred)
-    
-    # 3. Spearman rank correlation — monotonic ordering (higher is better, max=1)
-    #    Checks if predictions are in the right ORDER, even if values are compressed
-    spearman, _ = spearmanr(y_true, y_pred)
-    
-    # 4. Max absolute error — worst-case prediction (lower is better)
-    max_err = np.max(np.abs(y_true - y_pred))
-    
-    print(f"\n{'─' * 40}")
-    print(f"  {set_name} Metrics")
-    print(f"{'─' * 40}")
-    print(f"  R² Score:            {r2:.4f}   (>0.7 good, >0.5 acceptable)")
-    print(f"  Mean Absolute Error: {mae:.4f}   (<0.15 good, <0.25 acceptable)")
-    print(f"  Spearman ρ:         {spearman:.4f}   (closer to 1 = correct ordering)")
-    print(f"  Max Absolute Error:  {max_err:.4f}   (worst single prediction)")
-    print(f"{'─' * 40}")
-    
-    return { "r2": r2, "mae": mae, "spearman": spearman, "max_err": max_err}
-
-if EVALUATE_PROBE:
-    print("=" * 50)
-    print("embedding anchor sentences")
-    anchor_embeddings = np.zeros((len(anchors), EMBEDDING_SIZE))
-    anchor_scores = np.zeros((len(anchors), ))
-    for i, anchor_sentence in enumerate(anchors):
-        resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=anchor_sentence)
-        anchor_embeddings[i, :] = resp['embedding']
-        anchor_scores[i] = project(test_embeddings[i, :], model)
-
-    # breakpoint()
-    # print(y.shape, anchor_embeddings.shape)
-    # print(test_labels, test_embeddings.shape)
-    # Evaluate on both sets
-    train_metrics = evaluate_probe(y, anchor_scores, "Anchor (Train)")
-    test_metrics  = evaluate_probe(test_labels,  test_scores,  "Test")
-
-    # Quick overfitting check
-    if train_metrics["r2"] - test_metrics["r2"] > 0.2:
-        print("\n⚠️  Large gap between train and test R² — possible overfitting.")
-    elif test_metrics["r2"] < 0.3:
-        print("\n⚠️  Low test R² — probe may be underfitting or embeddings don't encode this axis well.")
-    else:
-        print("\n✅  Train/test gap is reasonable — probe appears to generalize.")
-
-
-
-
-# X: (N, 768) anchor embeddings, y: (N,) labels in [0, 1]
-
-# ---------- 1. Polynomial features + Ridge ----------
-# Must reduce dimensionality first - degree-2 features on 768 raw dims is
-# combinatorially enormous (768 choose 2 ≈ 295k new features from 15 points).
-n_components = min(15, len(X) - 1)   # keep well below N to avoid a new singular system
-pca = PCA(n_components=n_components)
-X_reduced = pca.fit_transform(X)
-
-poly = PolynomialFeatures(degree=2, include_bias=False)
-X_poly = poly.fit_transform(X_reduced)   # now includes pairwise interaction terms
-
-alphas = np.logspace(-2, 4, 30)
-poly_model = RidgeCV(alphas=alphas)
-poly_model.fit(X_poly, y)
-
-# Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
-def loo_poly_eval(X, y, n_components):
-    preds = np.zeros(len(y))
-    loo = LeaveOneOut()
-    for train_idx, test_idx in loo.split(X):
-        pca_f = PCA(n_components=n_components).fit(X[train_idx])
-        Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
-        poly_f = PolynomialFeatures(degree=2, include_bias=False).fit(Xtr)
-        Xtr_p, Xte_p = poly_f.transform(Xtr), poly_f.transform(Xte)
-        m = RidgeCV(alphas=alphas).fit(Xtr_p, y[train_idx])
-        preds[test_idx] = m.predict(Xte_p)
-    return preds
-
-poly_preds = loo_poly_eval(X, y, n_components)
-rho_poly, _ = spearmanr(y, poly_preds)
-print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
 
 # order = np.argsort(X_poly)
 # plt.figure()
