@@ -14,8 +14,9 @@ import matplotlib.pyplot as plt
 from anchor_sentences import REGULATED_MARKET_ANCHORS_SENTENCES as ANCHORS
 from test_sentences import REGULATED_MARKET_TEST_SENTENCES as TEST_SET
 
-EMBEDDING_MODEL = 'nomic-embed-text-v2-moe:latest' #embeddinggemma:latest' #qwen3-embedding:0.6b' #'qwen3-embedding:0.6b' # 'nomic-embed-text-v2-moe:latest'
-EMBEDDING_SIZE = 768 #1024 #1024 #768
+# EMBEDDING_MODEL = 'embeddinggemma' #nomic-embed-text-v2-moe:latest' #embeddinggemma:latest' #qwen3-embedding:0.6b' #'qwen3-embedding:0.6b' # 'nomic-embed-text-v2-moe:latest'
+EMBEDDING_MODEL = 'qwen3-embedding:0.6b'  #nomic-embed-text-v2-moe:latest' #embeddinggemma:latest' ##'qwen3-embedding:0.6b' # 'nomic-embed-text-v2-moe:latest'
+EMBEDDING_SIZE = 1024 #1024 #1024 #768
 EVALUATE_PROBE = True
 
 
@@ -37,7 +38,7 @@ print("Fitting via ridge regession..")
 # 1. Fit the axis via ridge regression (closed-form, no iterative "training" loop).
 #    RidgeCV searches over alpha (regularization strength) using internal CV,
 #    which matters a lot here since N << 768 (see the underdetermined-system point).
-alphas = np.logspace(-5, -2, 30)
+alphas = np.logspace(-5, 0, 30)
 model = RidgeCV(alphas=alphas, store_cv_results=True)
 
 # alphas=(0.1, 1.0, 10.0), *, fit_intercept=True, scoring=None, cv=None, gcv_mode=None, store_cv_results=False, alpha_per_target=False
@@ -66,7 +67,7 @@ def project(x_doc, model):
 print("=" * 50)
 print("embedding test sentences")
 test_embeddings = np.zeros((len(TEST_SET), EMBEDDING_SIZE))
-test_labels = np.zeros((len(TEST_SET), 1))
+test_labels = np.zeros((len(TEST_SET), ))
 for i, test_sentence in enumerate(TEST_SET):
     resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=test_sentence['text'])
     test_embeddings[i, :] = resp['embedding']
@@ -77,15 +78,17 @@ print("Testing with projection on the fitted line")
 errors = np.zeros((len(TEST_SET), 1))
 min_val = 1
 max_val = 0
-for i, test_sentence in enumerate(test_sentences):
+test_scores = np.zeros((len(TEST_SET), ))
+for i, test_sentence in enumerate(TEST_SET):
     score = project(test_embeddings[i, :], model)
+    test_scores[i] = score
     if score < min_val:
         min_val = score 
     if score > max_val:
         max_val = score
     errors[i] = np.abs(score - test_sentence['label'])
 
-print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
+# print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
 
 print(f"with fitted line on the embeddings from {EMBEDDING_MODEL}:")
 print(f"    MAE: {(np.mean(errors)):.03f}")
@@ -109,14 +112,14 @@ print("Testing with projection on the fitted line after using PCA")
 errors = np.zeros((len(TEST_SET), 1))
 min_val = 1
 max_val = 0
-for i, test_sentence in enumerate(test_sentences):
+for i, test_sentence in enumerate(TEST_SET):
     score = project_reduced(test_embeddings[i, :], pca, model_reduced) 
     if score < min_val:
         min_val = score 
     if score > max_val:
         max_val = score
     errors[i] = np.abs(score - test_sentence['label'])
-    print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
+    # print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
 
 print(f"with fitted line after PCA on the embeddings from {EMBEDDING_MODEL}:")
 print(f"    MAE: {(np.mean(errors)):.03f}")
@@ -171,12 +174,18 @@ if EVALUATE_PROBE:
     print("=" * 50)
     print("embedding anchor sentences")
     anchor_embeddings = np.zeros((len(anchors), EMBEDDING_SIZE))
+    anchor_scores = np.zeros((len(anchors), ))
     for i, anchor_sentence in enumerate(anchors):
         resp = ollama.embeddings(model=EMBEDDING_MODEL, prompt=anchor_sentence)
         anchor_embeddings[i, :] = resp['embedding']
+        anchor_scores[i] = project(test_embeddings[i, :], model)
+
+    # breakpoint()
+    # print(y.shape, anchor_embeddings.shape)
+    # print(test_labels, test_embeddings.shape)
     # Evaluate on both sets
-    train_metrics = evaluate_probe(y, anchor_embeddings, "Anchor (Train)")
-    test_metrics  = evaluate_probe(test_labels,  test_embeddings,  "Test")
+    train_metrics = evaluate_probe(y, anchor_scores, "Anchor (Train)")
+    test_metrics  = evaluate_probe(test_labels,  test_scores,  "Test")
 
     # Quick overfitting check
     if train_metrics["r2"] - test_metrics["r2"] > 0.2:
@@ -222,13 +231,13 @@ poly_preds = loo_poly_eval(X, y, n_components)
 rho_poly, _ = spearmanr(y, poly_preds)
 print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
 
-order = np.argsort(X_poly)
-plt.figure()
-plt.title("Projection using Polynomial + Ridge")
-plt.plot(X_poly[order], y[order], 'o', label='true labels')
-plt.plot(X_poly[order], poly_model.predict(X_poly[order]), '-', label='isotonic fit')
-plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
-plt.show()
+# order = np.argsort(X_poly)
+# plt.figure()
+# plt.title("Projection using Polynomial + Ridge")
+# plt.plot(X_poly[order], y[order], 'o', label='true labels')
+# plt.plot(X_poly[order], poly_model.predict(X_poly[order]), '-', label='isotonic fit')
+# plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
+# plt.show()
 
 # ---------- 2. Isotonic recalibration on your existing linear axis ----------
 # Step A: fit your original linear axis (as before)
@@ -280,7 +289,7 @@ X_gp = pca_gp.fit_transform(X)
 
 # Kernel: constant * RBF (smooth variation) + white noise (label/embedding noise)
 kernel = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) \
-         + WhiteKernel(noise_level=1e-2, noise_level_bounds=(1e-5, 1e1))
+         + WhiteKernel(noise_level=1e-2, noise_level_bounds=(1e-6, 1e1))
 
 gp = GaussianProcessRegressor(kernel=kernel, normalize_y=True, n_restarts_optimizer=10)
 gp.fit(X_gp, y)
