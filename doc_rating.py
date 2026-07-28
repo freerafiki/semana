@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 from anchor_sentences import REGULATED_MARKET_ANCHORS_SENTENCES as ANCHORS
 from test_sentences import REGULATED_MARKET_TEST_SENTENCES as TEST_SET
 from parameters import EMBEDDING_MODEL, EMBEDDING_SIZE, PCA_COMPONENTS, EVALUATE_PROBE
-from eval_utils import embed_list, evaluate, evaluate_probe
+from eval_utils import embed_list, evaluate, evaluate_probe, \
+                        loo_poly_eval, loo_isotonic_eval, loo_gp_eval
 
 ##############################
 # INPUT
@@ -139,30 +140,7 @@ RR_test_metrics  = evaluate_probe(test_labels,  RR_test_scores,  "Test")
 # EVALUATE PROBE
 
 print("=" * 50)
-
-# ── Assume you already have these from your probe ──
-# y_true_test:  list/array of true labels for test sentences
-# y_pred_test:  list/array of predicted labels for test sentences
-# y_true_train: list/array of true labels for anchor sentences
-# y_pred_train: list/array of predicted labels for anchor sentences
-
-
-    # breakpoint()
-    # print(y.shape, anchor_embeddings.shape)
-    # print(test_labels, test_embeddings.shape)
-    # Evaluate on both sets
-
-    # # Quick overfitting check
-    # if train_metrics["r2"] - test_metrics["r2"] > 0.2:
-    #     print("\n⚠️  Large gap between train and test R² — possible overfitting.")
-    # elif test_metrics["r2"] < 0.3:
-    #     print("\n⚠️  Low test R² — probe may be underfitting or embeddings don't encode this axis well.")
-    # else:
-    #     print("\n✅  Train/test gap is reasonable — probe appears to generalize.")
-
-
-
-
+print("POLYNOMIAL")
 # X: (N, 768) anchor embeddings, y: (N,) labels in [0, 1]
 
 # ---------- 1. Polynomial features + Ridge ----------
@@ -179,26 +157,13 @@ alphas = np.logspace(-2, 4, 30)
 poly_model = RidgeCV(alphas=alphas)
 poly_model.fit(X_poly, anchor_labels)
 
-# Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
-def loo_poly_eval(X, y, n_components):
-    preds = np.zeros(len(y))
-    loo = LeaveOneOut()
-    for train_idx, test_idx in loo.split(X):
-        pca_f = PCA(n_components=PCA_COMPONENTS).fit(X[train_idx])
-        Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
-        poly_f = PolynomialFeatures(degree=2, include_bias=False).fit(Xtr)
-        Xtr_p, Xte_p = poly_f.transform(Xtr), poly_f.transform(Xte)
-        m = RidgeCV(alphas=alphas).fit(Xtr_p, y[train_idx])
-        preds[test_idx] = m.predict(Xte_p)
-    return preds
-
 poly_preds = loo_poly_eval(anchor_embeddings, anchor_labels, PCA_COMPONENTS)
 rho_poly, _ = spearmanr(anchor_labels, poly_preds)
 print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
 print("-" * 50)
 print("EVALUATION ON TEST SET")
 print("PCA + Polynomial + Ridge")
-PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_embeddings, test_labels, poly_model, print_results=True)
+PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_embeddings, test_labels, pca=pca, poly_f=poly, model=poly_model, print_results=True)
 
 # print("=" * 50)
 # print("EVALUATION ON TEST SET\nRidge Regression projection on TEST SET")
@@ -232,100 +197,70 @@ PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_emb
 # plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
 # plt.show()
 
-breakpoint()
-
+print("=" * 50)
+print("ISOTONIC")
 # ---------- 2. Isotonic recalibration on your existing linear axis ----------
 # Step A: fit your original linear axis (as before)
-linear_model = RidgeCV(alphas=alphas).fit(X, y)
-raw_projection = linear_model.predict(X)   # 1-D scores from the linear axis
+linear_model = RidgeCV(alphas=alphas).fit(anchor_embeddings, anchor_labels)
+raw_projection = linear_model.predict(anchor_embeddings)   # 1-D scores from the linear axis
 
 # Step B: fit a monotonic curve from raw_projection -> true label
 iso = IsotonicRegression(out_of_bounds='clip')  # 'clip' handles new docs outside training range
-iso.fit(raw_projection, y)
+iso.fit(raw_projection, anchor_labels)
 
-# Nested LOO evaluation (refit both stages per fold)
-def loo_isotonic_eval(X, y):
-    preds = np.zeros(len(y))
-    loo = LeaveOneOut()
-    for train_idx, test_idx in loo.split(X):
-        lin = RidgeCV(alphas=alphas).fit(X[train_idx], y[train_idx])
-        raw_tr = lin.predict(X[train_idx])
-        raw_te = lin.predict(X[test_idx])
-        iso_f = IsotonicRegression(out_of_bounds='clip').fit(raw_tr, y[train_idx])
-        preds[test_idx] = iso_f.predict(raw_te)
-    return preds
-
-iso_preds = loo_isotonic_eval(X, y)
-rho_iso, _ = spearmanr(y, iso_preds)
+iso_preds = loo_isotonic_eval(anchor_embeddings, anchor_labels)
+rho_iso, _ = spearmanr(anchor_labels, iso_preds)
 print(f"Isotonic-recalibrated LOO Spearman: {rho_iso:.3f}")
-
-# To score a new document:
-def score_isotonic(x_doc, linear_model, iso):
-    raw = linear_model.predict(x_doc.reshape(1, -1))
-    return iso.predict(raw)[0]
+print("-" * 50)
+print("EVALUATION ON TEST SET")
+print("PCA + Polynomial + Ridge")
+iso_test_scores, iso_test_errors, iso_test_min, iso_test_max = evaluate(test_embeddings, test_labels, pca=pca, model=linear_model, iso=iso, print_results=True)
 
 # Plot the recalibration curve - useful to *see* whether it's S-shaped
 # (confirming edge-compression was a real nonlinearity, not just noise)
 order = np.argsort(raw_projection)
 plt.figure()
 plt.title("Projection using Isotonic Recalibration")
-plt.plot(raw_projection[order], y[order], 'o', label='true labels')
+plt.plot(raw_projection[order], anchor_labels[order], 'o', label='true labels')
 plt.plot(raw_projection[order], iso.predict(raw_projection[order]), '-', label='isotonic fit')
 plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
 plt.show()
 
 
+print("=" * 50)
+print("GAUSSIAN")
 # ---------- 4. Gaussian Process Regression ----------
 # Reduce dimensionality first - GP kernels degrade in very high-dim spaces
 # (distances become less informative - "concentration of measure").
-n_components_gp = min(15, len(X) - 1)
-pca_gp = PCA(n_components=n_components_gp)
-X_gp = pca_gp.fit_transform(X)
+pca_gp = PCA(n_components=PCA_COMPONENTS)
+X_gp = pca_gp.fit_transform(anchor_embeddings)
 
 # Kernel: constant * RBF (smooth variation) + white noise (label/embedding noise)
 kernel = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) \
-         + WhiteKernel(noise_level=1e-2, noise_level_bounds=(1e-6, 1e1))
+         + WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-6, 1e1))
 
 gp = GaussianProcessRegressor(kernel=kernel, normalize_y=True, n_restarts_optimizer=10)
-gp.fit(X_gp, y)
+gp.fit(X_gp, anchor_labels)
 
-# Nested LOO evaluation
-def loo_gp_eval(X, y, n_components):
-    preds = np.zeros(len(y))
-    stds = np.zeros(len(y))
-    loo = LeaveOneOut()
-    for train_idx, test_idx in loo.split(X):
-        pca_f = PCA(n_components=n_components).fit(X[train_idx])
-        Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
-        k = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(1e-2, (1e-5, 1e1))
-        m = GaussianProcessRegressor(kernel=k, normalize_y=True, n_restarts_optimizer=10)
-        m.fit(Xtr, y[train_idx])
-        pred, std = m.predict(Xte, return_std=True)
-        preds[test_idx] = pred
-        stds[test_idx] = std
-    return preds, stds
-
-gp_preds, gp_stds = loo_gp_eval(X, y, n_components_gp)
-rho_gp, _ = spearmanr(y, gp_preds)
+gp_preds, gp_stds = loo_gp_eval(anchor_embeddings, anchor_labels, PCA_COMPONENTS)
+rho_gp, _ = spearmanr(anchor_labels, gp_preds)
 print(f"GP LOO Spearman: {rho_gp:.3f}")
 print(f"Mean LOO predictive std: {gp_stds.mean():.3f}")  # rough sense of typical uncertainty
-
-# Scoring a new document, WITH uncertainty:
-def score_gp(x_doc, pca_gp, gp):
-    x_reduced = pca_gp.transform(x_doc.reshape(1, -1))
-    mean, std = gp.predict(x_reduced, return_std=True)
-    return mean[0], std[0]
+print("-" * 50)
+print("EVALUATION ON TEST SET")
+print("PCA + Polynomial + Ridge")
+iso_test_scores, iso_test_errors, iso_test_min, iso_test_max = evaluate(test_embeddings, test_labels, pca=pca, model=linear_model, iso=iso, print_results=True)
 
 # score, uncertainty = score_gp(new_doc_embedding, pca_gp, gp)
 # print(f"Alignment score: {score:.3f} +/- {uncertainty:.3f}")
 
 # Plotting predictions with uncertainty bands (sorted by predicted score)
 order = np.argsort(gp_preds)
-x_axis = np.arange(len(y))
+x_axis = np.arange(len(anchor_labels))
 plt.figure()
 plt.title("Projection using Gaussian Process Regression")
 plt.errorbar(x_axis, gp_preds[order], yerr=gp_stds[order], fmt='o', label='GP prediction ± std')
-plt.plot(x_axis, y[order], 'k*', label='true label', markersize=10)
+plt.plot(x_axis, anchor_labels[order], 'k*', label='true label', markersize=10)
 plt.xlabel('anchor sentence (sorted by predicted score)'); plt.ylabel('alignment score')
 plt.legend(); plt.show()
 

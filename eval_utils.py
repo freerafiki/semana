@@ -2,7 +2,13 @@ import ollama
 import numpy as np 
 from sklearn.metrics import r2_score, mean_absolute_error
 from scipy.stats import spearmanr
-
+from sklearn.decomposition import PCA
+from sklearn.linear_model import RidgeCV
+from sklearn.model_selection import LeaveOneOut, cross_val_predict
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.isotonic import IsotonicRegression
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
 
 def embed_list(a_list, ollama_emb_model, emb_size):
     X = np.zeros((len(a_list), emb_size))
@@ -20,6 +26,21 @@ def project(x_doc, model):
 def project_reduced(x_doc, pca, model):
     return np.dot(pca.transform(x_doc.reshape(1, -1)), model.coef_)[0] + model.intercept_
 
+def project_poly(x_doc, pca, poly_f, model):
+    x_pca = pca.transform(x_doc)
+    x_poly = poly_f.transform(x_pca)
+    score = m.predict(x_poly)
+    return score 
+
+def project_isotonic(x_doc, linear_model, iso):
+    raw = linear_model.predict(x_doc.reshape(1, -1))
+    return iso.predict(raw)[0]
+
+# Scoring a new document, WITH uncertainty:
+def project_gp(x_doc, pca_gp, gp):
+    x_reduced = pca_gp.transform(x_doc.reshape(1, -1))
+    mean, std = gp.predict(x_reduced, return_std=True)
+    return mean[0], std[0]
 
 # Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
 def loo_poly_eval(X, y, n_components):
@@ -34,7 +55,36 @@ def loo_poly_eval(X, y, n_components):
         preds[test_idx] = m.predict(Xte_p)
     return preds
 
-def evaluate(embeddings, labels, model, projection_method, reduced=False, pca=None, print_results=True):
+# Nested LOO evaluation (refit both stages per fold)
+def loo_isotonic_eval(X, y):
+    preds = np.zeros(len(y))
+    loo = LeaveOneOut()
+    for train_idx, test_idx in loo.split(X):
+        lin = RidgeCV(alphas=alphas).fit(X[train_idx], y[train_idx])
+        raw_tr = lin.predict(X[train_idx])
+        raw_te = lin.predict(X[test_idx])
+        iso_f = IsotonicRegression(out_of_bounds='clip').fit(raw_tr, y[train_idx])
+        preds[test_idx] = iso_f.predict(raw_te)
+    return preds
+
+# Nested LOO evaluation
+def loo_gp_eval(X, y, n_components):
+    preds = np.zeros(len(y))
+    stds = np.zeros(len(y))
+    loo = LeaveOneOut()
+    for train_idx, test_idx in loo.split(X):
+        pca_f = PCA(n_components=n_components).fit(X[train_idx])
+        Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
+        k = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(1e-2, (1e-5, 1e1))
+        m = GaussianProcessRegressor(kernel=k, normalize_y=True, n_restarts_optimizer=10)
+        m.fit(Xtr, y[train_idx])
+        pred, std = m.predict(Xte, return_std=True)
+        preds[test_idx] = pred
+        stds[test_idx] = std
+    return preds, stds
+
+def evaluate(embeddings, labels, model, projection_method, print_results=True, \
+             pca=None, reduced=False, poly_f=None, iso=None):
     """
     projection_func is callable (the projection function)
     """
@@ -46,10 +96,17 @@ def evaluate(embeddings, labels, model, projection_method, reduced=False, pca=No
     assert len(embeddings) == len(labels), "misaligned embeddings and labels!"
     
     for i, test_sentence in enumerate(embeddings):
-        if reduced:
-            score = project_reduced(test_sentence, pca, model)
-        else:
-            score = project(test_sentence, model)
+        if projection_method == 'ridge':
+            if reduced:
+                score = project_reduced(test_sentence, pca, model)
+            else:
+                score = project(test_sentence, model)
+        elif projection_method == 'polynomial':
+            score = project_poly(test_sentence, pca=pca, poly_f=poly_f, model=model)
+        elif projection_method == 'isotonic':
+            score = project_isotonic(test_sentence, linear_model=model, iso=iso)
+        elif projection_method == 'gaussian':
+            score = project_gp(test_sentence, pca_gp=pca, gp=model)
         scores[i] = score
         if score < min_val:
             min_val = score 
@@ -62,7 +119,7 @@ def evaluate(embeddings, labels, model, projection_method, reduced=False, pca=No
         print(f"    MSE: {(np.mean(np.square(errors))):.03f}")
         print(f"    RMSE: {(np.mean(np.sqrt(np.square(errors)))):.03f}")
         print(f"    min_val: {min_val:.03f}")
-        print(f"    ma},_val: {max_val:.03f}")
+        print(f"    max,_val: {max_val:.03f}")
 
     return scores, errors, min_val, max_val
 
