@@ -9,9 +9,9 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
 import matplotlib.pyplot as plt
 
-from anchor_sentences import REGULATED_MARKET_ANCHORS_SENTENCES as ANCHORS
-from test_sentences import REGULATED_MARKET_TEST_SENTENCES as TEST_SET
-from parameters import EMBEDDING_MODEL, EMBEDDING_SIZE, PCA_COMPONENTS, EVALUATE_PROBE
+from anchor_sentences import WEALTH_ANCHORS_SINGLE_WORDS as ANCHORS
+from test_sentences import WEALTH_TEST_WORDS as TEST_SET
+from parameters import EMBEDDING_MODEL, EMBEDDING_SIZE, PCA_COMPONENTS
 from eval_utils import embed_list, evaluate, evaluate_probe, \
                         loo_poly_eval, loo_isotonic_eval, loo_gp_eval
 
@@ -85,7 +85,7 @@ print(f"Leave-one-out Spearman correlation: {rho:.3f} (p={p:.4f})")
 print("-" * 50)
 print("EVALUATION ON TEST SET")
 print("Ridge Regression")
-RR_test_scores, RR_test_errors, RR_test_min, RR_test_max = evaluate(test_embeddings, test_labels, ridge_model, print_results=True)
+RR_test_scores, RR_test_errors, RR_test_min, RR_test_max = evaluate(test_embeddings, test_labels, ridge_model, projection_method='ridge', print_results=True)
 
 # print(f"Alignment score: {score}\nLabel score: {test_sentence['label']}")
 
@@ -98,7 +98,7 @@ model_reduced = RidgeCV(alphas=alphas).fit(X_reduced, anchor_labels)
 
 print("-" * 50)
 print(f"PCA + Ridge Regression (PCA with {PCA_COMPONENTS} components)")
-PCA_RR_test_scores, PCA_RR_test_errors, PCA_RR_test_min, PCA_RR_test_max = evaluate(test_embeddings, test_labels, model_reduced, reduced=True, pca=pca, print_results=True)
+PCA_RR_test_scores, PCA_RR_test_errors, PCA_RR_test_min, PCA_RR_test_max = evaluate(test_embeddings, test_labels, model_reduced, reduced=True, pca=pca, projection_method='ridge', print_results=True)
 
 # errors = np.zeros((len(TEST_SET), 1))
 # min_val = 1
@@ -125,7 +125,7 @@ PCA_RR_test_scores, PCA_RR_test_errors, PCA_RR_test_min, PCA_RR_test_max = evalu
 print("-" * 50)
 print("TRAIN vs TEST set metrics")
 print("-" * 50)
-RR_anchors_scores, RR_anchor_errors, RR_anchor_min, RR_anchor_max = evaluate(anchor_embeddings, anchor_labels, ridge_model)
+RR_anchors_scores, RR_anchor_errors, RR_anchor_min, RR_anchor_max = evaluate(anchor_embeddings, anchor_labels, ridge_model, projection_method='ridge')
 # RR_anchors_scores = np.zeros((len(TEST_SET), 1))
 # for i, anchor_emb in enumerate(X):
 #     RR_anchors_scores[i] = project(anchor_emb, ridge_model)
@@ -157,13 +157,13 @@ alphas = np.logspace(-2, 4, 30)
 poly_model = RidgeCV(alphas=alphas)
 poly_model.fit(X_poly, anchor_labels)
 
-poly_preds = loo_poly_eval(anchor_embeddings, anchor_labels, PCA_COMPONENTS)
+poly_preds = loo_poly_eval(anchor_embeddings, anchor_labels, alphas=alphas)
 rho_poly, _ = spearmanr(anchor_labels, poly_preds)
 print(f"Polynomial+Ridge LOO Spearman: {rho_poly:.3f}")
 print("-" * 50)
 print("EVALUATION ON TEST SET")
 print("PCA + Polynomial + Ridge")
-PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_embeddings, test_labels, pca=pca, poly_f=poly, model=poly_model, print_results=True)
+# PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_embeddings, test_labels, pca=pca, poly_f=poly, model=poly_model, projection_method='polynomial', print_results=True)
 
 # print("=" * 50)
 # print("EVALUATION ON TEST SET\nRidge Regression projection on TEST SET")
@@ -197,7 +197,8 @@ PPR_test_scores, PPR_test_errors, PPR_test_min, PPR_test_max = evaluate(test_emb
 # plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
 # plt.show()
 
-print("=" * 50)
+print()
+print("#" * 50)
 print("ISOTONIC")
 # ---------- 2. Isotonic recalibration on your existing linear axis ----------
 # Step A: fit your original linear axis (as before)
@@ -208,26 +209,33 @@ raw_projection = linear_model.predict(anchor_embeddings)   # 1-D scores from the
 iso = IsotonicRegression(out_of_bounds='clip')  # 'clip' handles new docs outside training range
 iso.fit(raw_projection, anchor_labels)
 
-iso_preds = loo_isotonic_eval(anchor_embeddings, anchor_labels)
+iso_preds = loo_isotonic_eval(anchor_embeddings, anchor_labels, alphas=alphas)
 rho_iso, _ = spearmanr(anchor_labels, iso_preds)
 print(f"Isotonic-recalibrated LOO Spearman: {rho_iso:.3f}")
 print("-" * 50)
 print("EVALUATION ON TEST SET")
-print("PCA + Polynomial + Ridge")
-iso_test_scores, iso_test_errors, iso_test_min, iso_test_max = evaluate(test_embeddings, test_labels, pca=pca, model=linear_model, iso=iso, print_results=True)
+print("Isotonic")
+iso_test_scores, iso_test_errors, iso_test_min, iso_test_max = evaluate(test_embeddings, test_labels, pca=pca, model=linear_model, iso=iso, projection_method='isotonic', print_results=True)
+
+print("-" * 50)
+print("TRAIN vs TEST set metrics")
+print("-" * 50)
+iso_anchors_scores, iso_anchor_errors, iso_anchor_min, iso_anchor_max = evaluate(anchor_embeddings, anchor_labels, pca=pca, model=linear_model, iso=iso, projection_method='isotonic')
+iso_train_metrics = evaluate_probe(anchor_labels, iso_anchors_scores, "Anchor (Train)")
+iso_test_metrics  = evaluate_probe(test_labels,  iso_test_scores,  "Test")
 
 # Plot the recalibration curve - useful to *see* whether it's S-shaped
 # (confirming edge-compression was a real nonlinearity, not just noise)
-order = np.argsort(raw_projection)
-plt.figure()
-plt.title("Projection using Isotonic Recalibration")
-plt.plot(raw_projection[order], anchor_labels[order], 'o', label='true labels')
-plt.plot(raw_projection[order], iso.predict(raw_projection[order]), '-', label='isotonic fit')
-plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
-plt.show()
+# order = np.argsort(raw_projection)
+# plt.figure()
+# plt.title("Projection using Isotonic Recalibration")
+# plt.plot(raw_projection[order], anchor_labels[order], 'o', label='true labels')
+# plt.plot(raw_projection[order], iso.predict(raw_projection[order]), '-', label='isotonic fit')
+# plt.xlabel('raw linear axis projection'); plt.ylabel('label'); plt.legend()
+# plt.show()
 
-
-print("=" * 50)
+print()
+print("#" * 50)
 print("GAUSSIAN")
 # ---------- 4. Gaussian Process Regression ----------
 # Reduce dimensionality first - GP kernels degrade in very high-dim spaces
@@ -237,7 +245,7 @@ X_gp = pca_gp.fit_transform(anchor_embeddings)
 
 # Kernel: constant * RBF (smooth variation) + white noise (label/embedding noise)
 kernel = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) \
-         + WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-6, 1e1))
+         + WhiteKernel(noise_level=1e-3, noise_level_bounds=(1e-9, 1e1))
 
 gp = GaussianProcessRegressor(kernel=kernel, normalize_y=True, n_restarts_optimizer=10)
 gp.fit(X_gp, anchor_labels)
@@ -248,21 +256,27 @@ print(f"GP LOO Spearman: {rho_gp:.3f}")
 print(f"Mean LOO predictive std: {gp_stds.mean():.3f}")  # rough sense of typical uncertainty
 print("-" * 50)
 print("EVALUATION ON TEST SET")
-print("PCA + Polynomial + Ridge")
-iso_test_scores, iso_test_errors, iso_test_min, iso_test_max = evaluate(test_embeddings, test_labels, pca=pca, model=linear_model, iso=iso, print_results=True)
+print("Gaussian")
+gp_test_scores, gp_uncertaintis, gp_test_errors, gp_test_min, gp_test_max = evaluate(test_embeddings, test_labels, pca=pca, model=gp, projection_method='gaussian', print_results=True)
 
+print("-" * 50)
+print("TRAIN vs TEST set metrics")
+print("-" * 50)
+gp_anchors_scores, gp_anchor_unc, gp_anchor_errors, gp_anchor_min, gp_anchor_max = evaluate(anchor_embeddings, anchor_labels, pca=pca, model=gp, projection_method='gaussian')
+gp_train_metrics = evaluate_probe(anchor_labels, gp_anchors_scores, "Anchor (Train)")
+gp_test_metrics  = evaluate_probe(test_labels,  gp_test_scores,  "Test")
 # score, uncertainty = score_gp(new_doc_embedding, pca_gp, gp)
 # print(f"Alignment score: {score:.3f} +/- {uncertainty:.3f}")
 
-# Plotting predictions with uncertainty bands (sorted by predicted score)
-order = np.argsort(gp_preds)
-x_axis = np.arange(len(anchor_labels))
-plt.figure()
-plt.title("Projection using Gaussian Process Regression")
-plt.errorbar(x_axis, gp_preds[order], yerr=gp_stds[order], fmt='o', label='GP prediction ± std')
-plt.plot(x_axis, anchor_labels[order], 'k*', label='true label', markersize=10)
-plt.xlabel('anchor sentence (sorted by predicted score)'); plt.ylabel('alignment score')
-plt.legend(); plt.show()
+# # Plotting predictions with uncertainty bands (sorted by predicted score)
+# order = np.argsort(gp_preds)
+# x_axis = np.arange(len(anchor_labels))
+# plt.figure()
+# plt.title("Projection using Gaussian Process Regression")
+# plt.errorbar(x_axis, gp_preds[order], yerr=gp_stds[order], fmt='o', label='GP prediction ± std')
+# plt.plot(x_axis, anchor_labels[order], 'k*', label='true label', markersize=10)
+# plt.xlabel('anchor sentence (sorted by predicted score)'); plt.ylabel('alignment score')
+# plt.legend(); plt.show()
 
 # # For real documents: flag any with std well above what you saw on LOO anchors -
 # # that means the document sits in a region of embedding space far from anything

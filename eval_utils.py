@@ -4,11 +4,12 @@ from sklearn.metrics import r2_score, mean_absolute_error
 from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
 from sklearn.linear_model import RidgeCV
-from sklearn.model_selection import LeaveOneOut, cross_val_predict
+from sklearn.model_selection import LeaveOneOut
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.isotonic import IsotonicRegression
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
+from parameters import PCA_COMPONENTS
 
 def embed_list(a_list, ollama_emb_model, emb_size):
     X = np.zeros((len(a_list), emb_size))
@@ -43,7 +44,7 @@ def project_gp(x_doc, pca_gp, gp):
     return mean[0], std[0]
 
 # Nested LOO evaluation (redo PCA+poly+ridge per fold to avoid leakage)
-def loo_poly_eval(X, y, n_components):
+def loo_poly_eval(X, y, alphas):
     preds = np.zeros(len(y))
     loo = LeaveOneOut()
     for train_idx, test_idx in loo.split(X):
@@ -56,7 +57,7 @@ def loo_poly_eval(X, y, n_components):
     return preds
 
 # Nested LOO evaluation (refit both stages per fold)
-def loo_isotonic_eval(X, y):
+def loo_isotonic_eval(X, y, alphas):
     preds = np.zeros(len(y))
     loo = LeaveOneOut()
     for train_idx, test_idx in loo.split(X):
@@ -75,7 +76,7 @@ def loo_gp_eval(X, y, n_components):
     for train_idx, test_idx in loo.split(X):
         pca_f = PCA(n_components=n_components).fit(X[train_idx])
         Xtr, Xte = pca_f.transform(X[train_idx]), pca_f.transform(X[test_idx])
-        k = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(1e-2, (1e-5, 1e1))
+        k = ConstantKernel(1.0, (1e-2, 1e2)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(1e-2, (1e-10, 1e1))
         m = GaussianProcessRegressor(kernel=k, normalize_y=True, n_restarts_optimizer=10)
         m.fit(Xtr, y[train_idx])
         pred, std = m.predict(Xte, return_std=True)
@@ -92,7 +93,8 @@ def evaluate(embeddings, labels, model, projection_method, print_results=True, \
     errors = np.zeros((len(embeddings), 1))
     min_val = 1
     max_val = 0
-
+    if projection_method == 'gaussian':
+        uncertainties = np.zeros((len(embeddings), 1))
     assert len(embeddings) == len(labels), "misaligned embeddings and labels!"
     
     for i, test_sentence in enumerate(embeddings):
@@ -106,8 +108,10 @@ def evaluate(embeddings, labels, model, projection_method, print_results=True, \
         elif projection_method == 'isotonic':
             score = project_isotonic(test_sentence, linear_model=model, iso=iso)
         elif projection_method == 'gaussian':
-            score = project_gp(test_sentence, pca_gp=pca, gp=model)
+            score, uncertainty = project_gp(test_sentence, pca_gp=pca, gp=model)
         scores[i] = score
+        if projection_method == 'gaussian':
+            uncertainties[i] = uncertainty
         if score < min_val:
             min_val = score 
         if score > max_val:
@@ -121,6 +125,9 @@ def evaluate(embeddings, labels, model, projection_method, print_results=True, \
         print(f"    min_val: {min_val:.03f}")
         print(f"    max,_val: {max_val:.03f}")
 
+    if projection_method == 'gaussian':
+        print(f"    avg std.dev: {(np.mean(uncertainties)):.03f}")
+        return scores, uncertainties, errors, min_val, max_val, 
     return scores, errors, min_val, max_val
 
 
@@ -146,7 +153,7 @@ def evaluate_probe(y_true, y_pred, set_name=""):
     print(f"{'─' * 40}")
     print(f"  R² Score:            {r2:.4f}   (>0.7 good, >0.5 acceptable)")
     print(f"  Mean Absolute Error: {mae:.4f}   (<0.15 good, <0.25 acceptable)")
-    print(f"  Spearman ρ:         {spearman:.4f}   (closer to 1 = correct ordering)")
+    print(f"  Spearman ρ:          {spearman:.4f}   (closer to 1 = correct ordering)")
     print(f"  Max Absolute Error:  {max_err:.4f}   (worst single prediction)")
     print(f"{'─' * 40}")
     

@@ -38,8 +38,8 @@ WEALTH_ANCHORS_SINGLE_WORDS = {
     'labels': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 }
 
-WEALTH_ANCHORS_SINGLE_WORDS = {
-    'datatype': 'words',
+WEALTH_ANCHORS_SENTENCES = {
+    'datatype': 'senteces',
     'type': 'scale',
     'data': [
         "Unable to afford food, shelter, or medicine; dependent on emergency aid just to survive each day.",

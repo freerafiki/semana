@@ -95,3 +95,37 @@ REGULATED_MARKET_TEST_SENTENCES = {
 #     { "text": "Five-year plans set output targets for major industries, with private trade permitted only in minor consumer goods.", "label": 0.85},
 #     { "text": "Wages, prices, and production quotas are fixed by a central authority across nearly the entire economy.", "label": 0.95},
 # ]
+
+WEALTH_TEST_WORDS = {
+    'data': [
+        "Penurious",
+        "Skint",
+        "Underprivileged",
+        "Hand-to-mouth",
+        "Solvent",
+        "Well-off",
+        "Prosperous",
+        "Moneyed",
+        "Loaded",
+        "Opulent",
+    ],
+    'labels': [0.05, 0.18, 0.28, 0.40, 0.55, 0.68, 0.76, 0.84, 0.92, 0.98],
+    'type': 'words'
+}
+
+WEALTH_TEST_SENTENCES = {
+    'data': [
+        "Survives on discarded food and sleeps in doorways; possesses nothing of monetary value.",
+        "Evicted last month and couch-surfing; owes money to multiple creditors with no realistic repayment plan.",
+        "Grew up in public housing and works two minimum-wage jobs; dreams of someday affording dental care.",
+        "Income barely stretches to cover groceries and transit; skipped the dentist again this year.",
+        "Manages to save a little each month after paying rent and utilities; treats include store-brand coffee.",
+        "Owns a reliable car and rents a decent apartment; contributes modest amounts to a retirement account annually.",
+        "Recently promoted to senior management; took a Mediterranean cruise last summer without going into debt.",
+        "Paid off the mortgage early; holds a diversified portfolio generating meaningful dividend income quarterly.",
+        "Net worth comfortably in seven figures; considers a vacation home purchase this year as a lifestyle upgrade.",
+        "Flies privately, maintains residences on three continents, and serves on multiple corporate boards.",
+    ],
+    'labels': [0.05, 0.18, 0.28, 0.40, 0.55, 0.68, 0.76, 0.84, 0.92, 0.98],
+    'type': 'sentences'
+}
